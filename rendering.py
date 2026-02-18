@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 from grid_utils import cube_to_pixel, hex_corners
 
-COLOURS = ['darkblue', 'blue', 'olivedrab', 'green', 'darkgreen', 'grey', 'white']
+COLOURS = ['darkblue', 'blue', 'olivedrab', 'green', 'darkgreen', 'grey', 'white', 'brown']
 
 
 def original_mapper(hex):
@@ -56,8 +56,11 @@ def draw_hex_grid(grid, size=1, value_mapper=None, ax=None, title=None):
     return ax
 
 
-def draw_hex_grid_side_by_side(grid, country_grid, starts, size=1):
-    fig, axs = plt.subplots(1, 2, figsize=(24, 8))
+def draw_hex_grid_side_by_side(axs, grid, country_grid, starts, size=1):
+
+    # Clear both axes
+    axs[0].clear()
+    axs[1].clear()
 
     # --- Left: Original terrain ---
     draw_hex_grid(
@@ -82,10 +85,6 @@ def draw_hex_grid_side_by_side(grid, country_grid, starts, size=1):
     for hex in starts:
         cx, cy = cube_to_pixel(hex, size)
         ax_countries.plot(cx, cy, 'ko', markersize=8)
-
-
-    plt.tight_layout()
-    plt.show()
 
 
 
