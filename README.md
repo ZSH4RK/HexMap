@@ -1,3 +1,17 @@
+# Ideas
+- [X] Scoreboard
+- [X] Volcanoes 
+- [ ] Perlin Noise add on to terrain to create water/mountainous areas 
+- [ ] Biomes (Hot/Cold Wet/Dry)
+- [ ] Rivers
+- [ ] Preloaded Map eg. World Map
+- [ ] Improved Efficiency of generation
+- [ ] Improved Scoring UI
+- [ ] Website/Improved viewing of the map 
+- [ ] ML improvement of CPU
+- [ ] Different Views ie. Country vs Country or Local Battles
+- [ ] Game Version - Human playing vs. CPU 
+
 # V1 Examples
 
 <img width="2457" height="1225" alt="image (4)" src="https://github.com/user-attachments/assets/c1447615-b80f-439b-92b9-2fa5e35ebcf0" />
