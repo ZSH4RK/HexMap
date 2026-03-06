@@ -1,45 +1,58 @@
 import math
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
+from hex import Hex  # your Hex class
 
-DIRECTIONS = [
-    (1, -1, 0),
-    (1, 0, -1),
-    (0, 1, -1),
-    (-1, 1, 0),
-    (-1, 0, 1),
-    (0, -1, 1),
-]
+class Grid:
+    def __init__(self, radius: int, start_value: int):
+        self.radius = radius
+        self.start_value = start_value
+        self.grid = self.generate_grid()
 
+    def generate_grid(self):
+        r = self.radius
+        return [
+            Hex(x, y, -x - y)
+            for x in range(-r, r + 1)
+            for y in range(max(-r, -x - r), min(r, -x + r) + 1)
+        ]
 
-def cube_to_pixel(hex, size):
-    px = size * math.sqrt(3) * (hex.x + hex.z / 2)
-    py = size * 3 / 2 * hex.z
-    return px, py
+    def cube_to_pixel(self, hexes, size):
+        # hexes: Nx3 array [[x, y, z], ...]
+        x, y, z = hexes[:,0], hexes[:,1], hexes[:,2]
+        px = size * np.sqrt(3) * (x + z / 2)
+        py = size * 3/2 * z
+        return px, py
 
+    def draw_hex_grid(self, size=1, color="white"):
+        fig, ax = plt.subplots()
 
-def hex_corners(cx, cy, size):
-    corners = []
-    for i in range(6):
-        angle = math.radians(60 * i - 30)
-        x = cx + size * math.cos(angle)
-        y = cy + size * math.sin(angle)
-        corners.append((x, y))
-    return corners
+        # Convert hexes to numpy array
+        hexes_array = np.array([[h.x, h.y, h.z] for h in self.grid])
+        cx, cy = self.cube_to_pixel(hexes_array, size)
 
+        # Precompute corner offsets
+        angles = np.radians(np.arange(0, 360, 60) - 30)
+        corner_offsets = np.stack([np.cos(angles), np.sin(angles)], axis=1) * size
 
-def generate_grid(radius, Hex):
-    grid = []
-    for x in range(-radius, radius + 1):
-        for y in range(max(-radius, -x - radius),
-                       min(radius, -x + radius) + 1):
-            z = -x - y
-            grid.append(Hex(x, y, z))
-    return grid
+        # Add offsets to each hex center
+        polygons = (np.expand_dims(np.stack([cx, cy], axis=1), 1) + corner_offsets).tolist()
 
+        collection = PolyCollection(
+            polygons,
+            edgecolors="black",
+            facecolors=color,
+            linewidths=0.5
+        )
+        ax.add_collection(collection)
 
-def get_neighbours(hex, grid):
-    neighbours = []
-    for dx, dy, dz in DIRECTIONS:
-        coords = (hex.x + dx, hex.y + dy, hex.z + dz)
-        if coords in grid:
-            neighbours.append(grid[coords])
-    return neighbours
+        # Set limits without autoscale (much faster)
+        limit = size * (self.radius + 1) * 2
+        ax.set_xlim(-limit, limit)
+        ax.set_ylim(-limit, limit)
+        ax.set_aspect("equal")
+        ax.axis("off")
+
+        fig.savefig("grid_vectorized.png", bbox_inches="tight", dpi=300)
+        return ax

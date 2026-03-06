@@ -1,5 +1,6 @@
 from typing import Tuple
 
+
 class Hex:
 
     def __init__(self, x, y, z, value=0, base=None):
@@ -18,6 +19,7 @@ class Hex:
     def get_neighbour(self, direction: Tuple[int, int, int]):
         return Hex(direction)
     
+    # Coordinate changes
     def cube_to_axial(self):
         q = self.x
         r = self.r
@@ -36,9 +38,14 @@ class Hex:
 def cube_subtract(a: Hex, b: Hex):
     return (a.x-b.x, a.y-b.y, a.z-b.z)
 
-def cube_distance(a, b):
+def cube_distance(a: Hex, b: Hex):
     vec = cube_subtract(a, b)
     return (abs(vec[1]), abs(vec[2]), abs(vec[3])) / 2
     
 
+#Range
+def movement_range(a: Hex, distance: int, grid):
+    results = []
+    for tile in grid:
+        pass
 
