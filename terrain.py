@@ -1,219 +1,391 @@
 import random
-from grid_utils import get_neighbours
+from grid_utils import Grid
+from hex import Hex
+import numpy as np
+from collections import deque
+
+VALUES = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+NUM_VALUES = len(VALUES)
+
+ALL_VALUES = np.arange(1, NUM_VALUES + 1)
 
 
-VALUES = [1, 2, 3, 4, 5, 6, 7]
+def reset_grid_values(grid):
+    """
+    Reset grid values so generation can retry cleanly.
+    """
+    for h in grid.grid:
+        h.value = 0
 
 
-def allowed_values(hex, grid):
-    neighbours = get_neighbours(hex, grid)
-    assigned = [n.value for n in neighbours if n.value != 0]
+def assign_values_with_retry(grid, seeds=None, max_attempts=25, verbose=True):
+    """
+    Runs assign_values_with_seeds with automatic retries if
+    a contradiction occurs.
+    """
+    last_error = None
 
-    if not assigned:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            reset_grid_values(grid)
+
+            if verbose:
+                print(f"Generation attempt {attempt}/{max_attempts}")
+
+            assign_values_with_seeds(grid, seeds)
+
+            if verbose:
+                print("Grid generation succeeded")
+
+            return True
+
+        except Exception as e:
+            last_error = e
+            if verbose:
+                print(f"Retrying due to: {e}")
+
+    raise last_error
+
+
+def allowed_values_from_used(used):
+    used = used[used != 0]
+
+    if used.size == 0:
         return VALUES
 
-    possible = []
-    for candidate in VALUES:
-        if all(abs(candidate - v) <= 1 for v in assigned):
-            possible.append(candidate)
+    diff_ok = np.abs(VALUES[:, None] - used[None, :]) <= 1
+    valid_mask = np.all(diff_ok, axis=1)
 
-    return possible
+    return VALUES[valid_mask]
 
 
-def weighted_choice(hex, grid, possible_values):
-    neighbours = get_neighbours(hex, grid)
-    weights = []
+def weighted_choice_fast(options, neighbour_values):
+    if options.size == 0:
+        return None
 
-    for value in possible_values:
-        count = sum(1 for n in neighbours if n.value == value)
-        weights.append(count * 0.5 + 1)
+    weights = np.array([
+        np.sum(neighbour_values == v) * 0.5 + 1
+        for v in options
+    ])
 
-    return random.choices(possible_values, weights=weights)[0]
+    probabilities = weights / weights.sum()
+    return np.random.choice(options, p=probabilities)
 
 
-def assign_values_mrv(grid, center_coords):
-    grid[center_coords].value = 5
+def build_indexed_grid(grid):
+    hex_list = list(grid.grid_dict.values())
+
+    index_of = {(h.x, h.y, h.z): i for i, h in enumerate(hex_list)}
+
+    directions = [
+        (1,-1,0),(1,0,-1),(0,1,-1),
+        (-1,1,0),(-1,0,1),(0,-1,1)
+    ]
+
+    neighbours = []
+
+    for h in hex_list:
+        n_idx = []
+        for dx,dy,dz in directions:
+            key = (h.x+dx, h.y+dy, h.z+dz)
+            if key in index_of:
+                n_idx.append(index_of[key])
+        neighbours.append(np.array(n_idx, dtype=np.int32))
+
+    return hex_list, neighbours
+
+
+def assign_values_with_seeds(grid, seeds=None):
+    hex_list, neighbours = build_indexed_grid(grid)
+    n = len(hex_list)
+
+    domains = np.ones((n, NUM_VALUES), dtype=bool)
+    values = np.zeros(n, dtype=np.int16)
+    queue = deque()
+
+    VALUES = np.arange(1, NUM_VALUES + 1)
+    COMPAT = np.abs(VALUES[:, None] - VALUES[None, :]) <= 1
+
+
+    def collapse_to_value(idx, value):
+        value_index = value - 1
+        domains[idx][:] = False
+        domains[idx][value_index] = True
+        values[idx] = value
+        hex_list[idx].value = value
+        queue.append(idx)
+
+
+    def collapse(idx):
+        options = np.where(domains[idx])[0]
+
+        if options.size == 0:
+            raise Exception("No valid assignment")
+
+        neighbour_vals = values[neighbours[idx]]
+        neighbour_vals = neighbour_vals[neighbour_vals != 0]
+
+        if neighbour_vals.size == 0:
+            chosen_index = np.random.choice(options)
+        else:
+            option_values = options + 1
+            chosen_value = weighted_choice_fast(option_values, neighbour_vals)
+            chosen_index = chosen_value - 1
+
+        collapse_to_value(idx, chosen_index + 1)
+
+
+    def propagate():
+        while queue:
+            src = queue.popleft()
+            src_domain = domains[src]
+
+            for nb in neighbours[src]:
+
+                if values[nb] != 0:
+                    continue
+
+                before = domains[nb].copy()
+
+                allowed = np.any(COMPAT[src_domain], axis=0)
+
+                domains[nb] &= allowed
+
+                if not np.any(domains[nb]):
+                    raise Exception("No valid assignment")
+
+                if not np.array_equal(before, domains[nb]):
+                    queue.append(nb)
+
+
+    frontiers = []
+
+    if seeds is not None:
+        coord_lookup = {(h.x, h.y, h.z): i for i, h in enumerate(hex_list)}
+
+        for (x, y, z), value in seeds:
+            idx = coord_lookup.get((x, y, z))
+            if idx is not None:
+                collapse_to_value(idx, value)
+                frontiers.append(deque([idx]))
+
+
+    while frontiers:
+        for frontier in list(frontiers):
+
+            if not frontier:
+                frontiers.remove(frontier)
+                continue
+
+            src = frontier.popleft()
+
+            for nb in neighbours[src]:
+
+                if values[nb] != 0:
+                    continue
+
+                collapse(nb)
+                propagate()
+
+                frontier.append(nb)
+
 
     while True:
-        unassigned = [h for h in grid.values() if h.value == 0]
-        if not unassigned:
+
+        unassigned = (values == 0)
+
+        if not np.any(unassigned):
             break
 
-        best_tile = None
-        best_options = None
-        smallest_option_count = float('inf')
+        sizes = domains.sum(axis=1)
+        sizes[~unassigned] = 9999
 
-        for tile in unassigned:
-            options = allowed_values(tile, grid)
-            if len(options) == 0:
-                raise Exception("No valid assignment possible")
+        # Random tie-breaking entropy (important improvement)
+        min_size = np.min(sizes)
+        candidates = np.where(sizes == min_size)[0]
+        idx = np.random.choice(candidates)
 
-            if len(options) < smallest_option_count:
-                smallest_option_count = len(options)
-                best_tile = tile
-                best_options = options
-
-        chosen_value = weighted_choice(best_tile, grid, best_options)
-        best_tile.value = chosen_value
+        collapse(idx)
+        propagate()
 
 
-def fix_isolated_values(grid):
+# -------------------------
+# Fix isolated low-value clusters
+# -------------------------
+def fix_isolated_values_np(grid):
 
-    def get_connected_group(start_hex, value, visited):
-        stack = [start_hex]
-        group = []
+    hex_list = grid.grid
+    values = np.array([h.value for h in hex_list])
 
-        while stack:
-            h = stack.pop()
-            if h in visited:
-                continue
-            visited.add(h)
-            if h.value == value:
-                group.append(h)
-                for n in get_neighbours(h, grid):
-                    if n not in visited and n.value == value:
-                        stack.append(n)
-        return group
-
-    visited = set()
+    visited = np.zeros(len(hex_list), dtype=bool)
     to_change = []
 
-    for h in grid.values():
-        if h.value in [1, 2] and h not in visited:
-            group = get_connected_group(h, h.value, visited)
-            if len(group) <= 2:
-                new_value = 2 if h.value == 1 else 3
-                to_change.extend([(g, new_value) for g in group])
+    for i, h in enumerate(hex_list):
 
-    for h, new_value in to_change:
-        h.value = new_value
+        if values[i] not in [1,2] or visited[i]:
+            continue
+
+        stack = [i]
+        group_idx = []
+
+        while stack:
+
+            idx = stack.pop()
+
+            if visited[idx]:
+                continue
+
+            visited[idx] = True
+
+            if values[idx] == values[i]:
+
+                group_idx.append(idx)
+
+                for n in hex_list[idx].get_all_neighbours(grid.grid_dict):
+
+                    n_idx = grid.grid.index(n)
+
+                    if not visited[n_idx] and values[n_idx] == values[i]:
+                        stack.append(n_idx)
+
+        if len(group_idx) <= 2:
+
+            new_val = 2 if values[i] == 1 else 3
+
+            to_change.extend([(idx,new_val) for idx in group_idx])
 
 
-def build_country_grid(grid, Hex):
+    for idx,new_val in to_change:
+        hex_list[idx].value = new_val
+        values[idx] = new_val
+
+
+# -------------------------
+# Country map
+# -------------------------
+def build_country_grid_np(grid, Hex):
+
+    hex_list = grid.grid
+    values = np.array([h.value for h in hex_list])
+
+    country_values = np.zeros_like(values)
+
+    country_values[(values >=3)&(values<=6)] = 1
+    country_values[values >=7] = 2
+
     country_grid = {}
 
-    for coords, h in grid.items():
-        base_value = h.value
+    for i,h in enumerate(hex_list):
 
-        if base_value in [1, 2]:
-            value = 0
-        elif 3 <= base_value <= 6:
-            value = 1
-        elif base_value in [7, 8]:
-            value = 2
-        else:
-            value = base_value
-
-        country_grid[coords] = Hex(
-            h.x, h.y, h.z,
-            value=value,
-            base=base_value
+        country_grid[(h.x,h.y,h.z)] = Hex(
+            h.x,
+            h.y,
+            h.z,
+            value=int(country_values[i]),
+            base=values[i]
         )
 
     return country_grid
 
-def cube_distance(a, b):
-    return max(
-        abs(a.x - b.x),
-        abs(a.y - b.y),
-        abs(a.z - b.z)
-    )
+
+# -------------------------
+# Cube distance
+# -------------------------
+def cube_distance_np(a_coords,b_coords):
+    return np.max(np.abs(a_coords - b_coords),axis=-1)
 
 
-import random
+# -------------------------
+# Volcano placement
+# -------------------------
+def can_place_volcano_np(center,grid,min_distance=10):
 
-def can_place_volcano(center, grid):
-    """
-    Returns True if:
-    - center.value == 6
-    - there are 6 neighbours
-    - at least one required pattern (0,2,4 or 1,3,5) is present among neighbours with value 7
-    - no existing volcano tile (value == 8) is within 10 tiles of the center
-    """
     if center.value != 6:
         return False
 
-    neighbours = get_neighbours(center, grid)
+    neighbours = center.get_all_neighbours(grid.grid_dict)
+
     if len(neighbours) != 6:
         return False
 
-    seven_indices = [i for i, n in enumerate(neighbours) if n.value == 7]
+    neighbour_values = np.array([n.value for n in neighbours])
+    seven_indices = np.where(neighbour_values == 7)[0]
 
-    # Required patterns (these indices must all be 7)
-    required_patterns = [
-        (0, 2, 4),
-        (1, 3, 5)
-    ]
+    patterns=[np.array([0,2,4]),np.array([1,3,5])]
 
-    if not any(all(idx in seven_indices for idx in pattern) for pattern in required_patterns):
+    if not any(np.all(np.isin(pat,seven_indices)) for pat in patterns):
         return False
 
-    # Distance rule: no existing volcano tile (value==8) within 10 tiles of the center
-    for h in grid.values():
-        if h.value == 8 and cube_distance(center, h) <= 10:
+    center_coords=np.array([center.x,center.y,center.z])
+    volcano_coords=np.array([[h.x,h.y,h.z] for h in grid.grid if h.value==8])
+
+    if volcano_coords.size>0:
+        distances=np.max(np.abs(volcano_coords-center_coords),axis=1)
+
+        if np.any(distances<=min_distance):
             return False
 
     return True
 
 
-def add_volcanoes(grid, min_center_spacing=10, trigger_chance=0.1):
-    """
-    Scans grid for valid volcano centers and schedules conversions.
-    Enforces:
-    - Only convert center + the three neighbours matching the chosen pattern.
-    - Extra 7s are allowed but not converted.
-    - No overlapping scheduled groups.
-    - Centers of scheduled volcanoes must be at least `min_center_spacing` tiles apart.
-    """
-    to_convert_groups = []
-    scheduled_tile_ids = set()      # prevent overlapping groups
-    scheduled_centers = []          # list of centers already scheduled (for spacing check)
+def add_volcanoes_np(grid,min_center_spacing=10,trigger_chance=0.25):
 
-    for center in grid.values():
-        if not can_place_volcano(center, grid):
+    hex_list=grid.grid
+
+    scheduled_ids=set()
+    scheduled_centers=[]
+    to_convert_groups=[]
+
+    for idx,center in enumerate(hex_list):
+
+        if center.value not in [8,9]:
             continue
 
-        neighbours = get_neighbours(center, grid)
-        seven_indices = [i for i, n in enumerate(neighbours) if n.value == 7]
+        neighbours=np.array(center.get_all_neighbours(grid.grid_dict))
 
-        # Determine which required patterns are contained
-        patterns = []
-        if all(i in seven_indices for i in (0, 2, 4)):
-            patterns.append((0, 2, 4))
-        if all(i in seven_indices for i in (1, 3, 5)):
-            patterns.append((1, 3, 5))
+        if len(neighbours)!=6:
+            continue
+
+        neighbour_values=np.array([n.value for n in neighbours])
+
+        seven_indices=np.where((neighbour_values==10)|(neighbour_values==9))[0]
+
+        patterns=[]
+
+        if set([0,2,4]).issubset(seven_indices):
+            patterns.append((0,2,4))
+
+        if set([1,3,5]).issubset(seven_indices):
+            patterns.append((1,3,5))
 
         if not patterns:
-            continue  # safety
-
-        # If both patterns present, pick one (random or deterministic)
-        chosen_pattern = random.choice(patterns)
-
-        # Build the group: center + the three neighbours at chosen indices
-        sevens = [neighbours[i] for i in chosen_pattern]
-        group = [center] + sevens
-
-        # Skip if any tile in this group is already scheduled (prevents overlap)
-        if any(id(tile) in scheduled_tile_ids for tile in group):
             continue
 
-        # Enforce spacing: center must be at least min_center_spacing from all scheduled centers
-        too_close = False
-        for scheduled_center in scheduled_centers:
-            if cube_distance(center, scheduled_center) < min_center_spacing:
-                too_close = True
-                break
-        if too_close:
+        chosen_pattern=random.choice(patterns)
+
+        group=[center]+[neighbours[i] for i in chosen_pattern]
+
+        if any(id(h) in scheduled_ids for h in group):
             continue
 
-        # 25% chance to trigger full 4-tile volcano (configurable via trigger_chance)
-        if random.random() < trigger_chance:
+        if scheduled_centers:
+
+            center_coords=np.array([center.x,center.y,center.z])
+            sched_coords=np.array([[c.x,c.y,c.z] for c in scheduled_centers])
+
+            distances=cube_distance_np(sched_coords,center_coords)
+
+            if np.any(distances<min_center_spacing):
+                continue
+
+        if random.random()<trigger_chance:
+
             to_convert_groups.append(group)
             scheduled_centers.append(center)
-            for tile in group:
-                scheduled_tile_ids.add(id(tile))
 
-    # Apply changes after scanning to avoid mutation issues
+            for h in group:
+                scheduled_ids.add(id(h))
+
     for group in to_convert_groups:
-        for tile in group:
-            tile.value = 8
+        for h in group:
+            h.value=0

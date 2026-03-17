@@ -9,6 +9,7 @@ class Grid:
         self.radius = radius
         self.start_value = start_value
         self.grid = self.generate_grid()
+        self.grid_dict = {(h.x, h.y, h.z): h for h in self.grid}
 
     def generate_grid(self):
         r = self.radius
@@ -25,7 +26,7 @@ class Grid:
         py = size * 3/2 * z
         return px, py
 
-    def draw_hex_grid(self, size=1, color="white"):
+    def draw_hex_grid(self, size=1):
         fig, ax = plt.subplots()
 
         # Convert hexes to numpy array
@@ -34,25 +35,50 @@ class Grid:
 
         # Precompute corner offsets
         angles = np.radians(np.arange(0, 360, 60) - 30)
-        corner_offsets = np.stack([np.cos(angles), np.sin(angles)], axis=1) * size
+        corner_offsets = np.stack(
+            [np.cos(angles), np.sin(angles)],
+            axis=1
+        ) * size
 
-        # Add offsets to each hex center
-        polygons = (np.expand_dims(np.stack([cx, cy], axis=1), 1) + corner_offsets).tolist()
+        # Build polygons
+        centers = np.stack([cx, cy], axis=1)
+        polygons = (np.expand_dims(centers, 1) + corner_offsets).tolist()
+
+        # -------- NEW PART: colour per hex --------
+        VALUE_TO_COLOUR = [
+            "darkblue",
+            "blue",
+            '#EED9A0',
+            "olivedrab",
+            "green",
+            "darkgreen",
+            '#556B2F',
+            "grey",
+            'darkgrey',
+            "white",
+            "maroon"
+        ]
+
+        facecolors = [
+            VALUE_TO_COLOUR[h.value-1]   
+            for h in self.grid
+        ]
+        
 
         collection = PolyCollection(
             polygons,
             edgecolors="black",
-            facecolors=color,
-            linewidths=0.5
+            facecolors=facecolors,  
+            linewidths=0.1
         )
+
         ax.add_collection(collection)
 
-        # Set limits without autoscale (much faster)
         limit = size * (self.radius + 1) * 2
         ax.set_xlim(-limit, limit)
         ax.set_ylim(-limit, limit)
         ax.set_aspect("equal")
         ax.axis("off")
 
-        fig.savefig("grid_vectorized.png", bbox_inches="tight", dpi=300)
+        fig.savefig("grid_vectorized.png", bbox_inches="tight", dpi=900)
         return ax
