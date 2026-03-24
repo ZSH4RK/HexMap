@@ -1,5 +1,5 @@
 from typing import Tuple
-
+import random
 
 class Hex:
 
@@ -15,6 +15,7 @@ class Hex:
         self.neighbour_directions = [   (-1, 0, 1), (0, -1, 1),
                                         (1, -1, 0), (1, 0, -1),
                                         (0, 1, -1), (-1, 1, 0)]
+        self.move_dir = random.random()
     
     def __eq__(self, other):
         return isinstance(other, Hex) and (self.x, self.y, self.z) == (other.x, other.y, other.z)
