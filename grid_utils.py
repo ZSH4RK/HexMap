@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
 from hex import Hex
 from plate import Plate
+from opensimplex import OpenSimplex
 
 class Grid:
     def __init__(self, radius: int, start_value: int):
@@ -12,6 +13,7 @@ class Grid:
         self.start_value = start_value
         self.grid = self.generate_grid()
         self.grid_dict = {(h.x, h.y, h.z): h for h in self.grid}
+        self.noise = OpenSimplex(seed=42)
         
 
     def generate_grid(self):
@@ -92,12 +94,7 @@ class Grid:
 
         fig.savefig("grid_vectorized.png", bbox_inches="tight", dpi=900)
         return ax
-    
-    def is_boundary(self, hex):
-        for n in hex.get_all_neighbours(self.grid_dict):
-            if n.plate_id != hex.plate_id:
-                return True
-        return False
+
                 
     def generate_plates(self, num_plates):
         import heapq
@@ -171,156 +168,200 @@ class Grid:
         for coords, pid in ownership.items():
             self.grid_dict[coords].plate_id = pid
 
-    def boundary_type(self, h):
-        my_plate = self.plates[h.plate_id]
+    def fractal_noise(self, x, z, octaves=5, persistence=0.5, lacunarity=2.0):
+        value = 0.0
+        amplitude = 1.0
+        frequency = 1.0
+        max_amp = 0.0
 
-        for n in self.neighbors(h):
-            if n.plate_id != h.plate_id:
-                other = self.plates[n.plate_id]
+        for _ in range(octaves):
+            n = self.noise.noise2(
+                x * frequency,
+                z * frequency
+            )
 
-                relative_motion = np.dot(
-                    my_plate.velocity - other.velocity,
-                    self.direction_to(h, n)
-                )
+            value += n * amplitude
+            max_amp += amplitude
 
-                if relative_motion > 0:
-                    return "convergent"
-                elif relative_motion < 0:
-                    return "divergent"
+            amplitude *= persistence
+            frequency *= lacunarity
 
-        return "transform"
-    
-    def boundary_profile(d, peak=3, width=6):
-        x = d / width
-        return x * np.exp(-x)   # smooth bump curve
-
-    def simulate_plates(self, steps=10, uplift_rate=0.05, rift_rate=0.02, smoothing=0.2,
-                    ocean_base=-1, continental_base=0.0):
-
-        from collections import deque
-
-        # Step 1: assign random plate velocities
-        for plate in self.plates:
-            angle = random.uniform(0, 2*np.pi)
-            speed = random.uniform(0.1, 0.5)
-            plate.velocity = np.array([np.cos(angle) * speed, np.sin(angle) * speed])
-
-        # Step 2: initialize heights
+        return value / (max_amp + 1e-6)
+    def generate_base_heightmap(self, scale=0.05, octaves=5):
         for h in self.grid:
-            plate = self.plates[h.plate_id]
-            h.height = ocean_base if plate.plate_type == "oceanic" else continental_base
+            n = self.fractal_noise(
+                h.x * scale,
+                h.z * scale,
+                octaves=octaves
+            )
+
+            # --- softer continent falloff ---
+            distance = math.sqrt(h.x ** 2 + h.z ** 2) / self.radius
+            falloff = max(0, 1 - distance ** 2)  # smoother, less harsh
+
+            # blend noise + continent shape
+            h.height = n * 0.8 + falloff * 0.2
+
+        # --- normalize to -1 → 1 ---
+        heights = [h.height for h in self.grid]
+        min_h, max_h = min(heights), max(heights)
+
+        for h in self.grid:
+            h.height = (h.height - min_h) / (max_h - min_h + 1e-6)
+            h.height = h.height * 2 - 1
+
+    def simulate_plates(self, steps=10):
+        plate_vectors = {
+            plate.id: plate.vector
+            for plate in self.plates
+        }
 
         directions = [
             (1, -1, 0), (1, 0, -1), (0, 1, -1),
             (-1, 1, 0), (-1, 0, 1), (0, -1, 1)
         ]
 
-        # -----------------------------
-        # 🔥 NEW: find boundary hexes
-        # -----------------------------
-        boundary_hexes = [h for h in self.grid if self.is_boundary(h)]
-        # -----------------------------
-        # 🔥 NEW: distance from boundary (BFS)
-        # -----------------------------
-        from collections import deque
+        # --- initialise heights ---
 
-        distance = {h: float("inf") for h in self.grid}
-        queue = deque()
 
-        for h in boundary_hexes:
-            distance[h] = 0
-            queue.append(h)
+        # =========================
+        # MAIN TIME LOOP
+        # =========================
+        for step in range(steps):
+            # --- accumulate changes separately (important!) ---
+            height_delta = {h: 0.0 for h in self.grid}
 
-        while queue:
-            current = queue.popleft()
+            for h in self.grid:
+                for dx, dy, dz in directions:
+                    neighbor_coords = (h.x + dx, h.y + dy, h.z + dz)
 
-            for n in current.get_all_neighbours(self.grid_dict):
-                if distance[n] > distance[current] + 1:
-                    distance[n] = distance[current] + 1
-                    queue.append(n)
+                    if neighbor_coords not in self.grid_dict:
+                        continue
 
-        max_dist = max(distance.values()) + 1e-6
+                    n = self.grid_dict[neighbor_coords]
 
-        # -----------------------------
-        # Simulation loop
-        # -----------------------------
-        for h in self.grid:
+                    if h.plate_id == n.plate_id:
+                        continue
 
-            d = distance[h]
+                    v1 = plate_vectors[h.plate_id]
+                    v2 = plate_vectors[n.plate_id]
 
-            if not np.isfinite(d):
-                continue
+                    relative = (v1[0] - v2[0], v1[1] - v2[1])
 
-            effect = self.boundary_profile(d)
+                    dx_world = n.x - h.x
+                    dz_world = n.z - h.z
 
-            if effect < 0.001:
-                continue
+                    length = math.sqrt(dx_world ** 2 + dz_world ** 2)
+                    if length == 0:
+                        continue
 
-            btype = self.boundary_type(h)
-            plate = self.plates[h.plate_id]
+                    normal = (dx_world / length, dz_world / length)
 
-            # --- CONVERGENT ---
-            if btype == "convergent":
+                    collision_strength = (
+                            relative[0] * normal[0] +
+                            relative[1] * normal[1]
+                    )
 
-                if plate.plate_type == "continental":
-                    # mountain building inland
-                    h.height += 2.5 * effect
+                    plate1 = self.plates[h.plate_id]
+                    plate2 = self.plates[n.plate_id]
 
-                else:  # oceanic
-                    # trench formation
-                    h.height -= 2.0 * effect
+                    # --- base effect ---
+                    if collision_strength > 0:
+                        height_delta[h] += collision_strength * 0.3
+                    else:
+                        height_delta[h] += collision_strength
 
-            # --- DIVERGENT ---
-            elif btype == "divergent":
-                # spreading ridges / rifts
-                h.height -= 1.2 * effect
+                    # --- plate type effects ---
+                    if collision_strength > 0:
+                        if plate1.plate_type == "continental" and plate2.plate_type == "continental":
+                            height_delta[h] += collision_strength * 0.5
 
-            # --- TRANSFORM ---
-            else:
-                # small roughness only
-                h.height += np.random.uniform(-0.1, 0.1) * effect
-            # -----------------------------
-            # Smooth terrain
-            # -----------------------------
-            smoothed_heights = {}
+                        elif plate1.plate_type == "oceanic":
+                            height_delta[h] -= collision_strength * 0.2
+
+            # --- apply accumulated changes ---
+            for h in self.grid:
+                h.height += height_delta[h]
+
+            # =========================
+            # SMOOTH EACH STEP
+            # =========================
+            new_heights = {}
+
             for h in self.grid:
                 total = h.height
                 count = 1
+
                 for dx, dy, dz in directions:
-                    n_coords = (h.x + dx, h.y + dy, h.z + dz)
-                    if n_coords in self.grid_dict:
-                        total += self.grid_dict[n_coords].height
+                    coords = (h.x + dx, h.y + dy, h.z + dz)
+                    if coords in self.grid_dict:
+                        total += self.grid_dict[coords].height
                         count += 1
-                smoothed_heights[h] = total / count
 
-            for h, h_smooth in smoothed_heights.items():
-                h.height = h.height * (1 - smoothing) + h_smooth * smoothing
+                new_heights[h] = total / count
 
-            # -----------------------------
-            # 🔥 NEW: interior shaping
-            # -----------------------------
             for h in self.grid:
-                d = distance[h] / max_dist
-
-                # nonlinear falloff = more natural
-                d = d ** 1.5
-
-                plate = self.plates[h.plate_id]
-
-                if plate.plate_type == "oceanic":
-                    h.height -= d * 0.6   # deeper ocean interiors
-                else:
-                    h.height += d * 0.3   # raised continental interiors
-
-            # -----------------------------
-            # 🔥 Fix global sea level
-            # -----------------------------
-            mean_height = np.mean([h.height for h in self.grid])
-            for h in self.grid:
-                h.height -= mean_height
+                h.height = new_heights[h]
 
             print(step)
-        print("heights min/max:", min([h.height for h in self.grid]), max([h.height for h in self.grid]))
+
+        # =========================
+        # NORMALIZE ONCE AT END
+        # =========================
+        heights = [h.height for h in self.grid]
+        min_h, max_h = min(heights), max(heights)
+
+        for h in self.grid:
+            h.height = (h.height - min_h) / (max_h - min_h + 1e-6)
+            h.height = h.height * 2 - 1
+
+    def draw_fractal_noise(self, size=1, scale=0.05, octaves=5):
+        fig, ax = plt.subplots()
+
+        hexes_array = np.array([[h.x, h.y, h.z] for h in self.grid])
+        cx, cy = self.cube_to_pixel(hexes_array, size)
+
+        angles = np.radians(np.arange(0, 360, 60) - 30)
+        corner_offsets = np.stack(
+            [np.cos(angles), np.sin(angles)],
+            axis=1
+        ) * size
+
+        centers = np.stack([cx, cy], axis=1)
+        polygons = (np.expand_dims(centers, 1) + corner_offsets).tolist()
+
+        # --- fractal noise ---
+        values = np.array([
+            self.fractal_noise(h.x * scale, h.z * scale, octaves=octaves)
+            for h in self.grid
+        ])
+
+        # Normalize 0–1
+        min_v = values.min()
+        max_v = values.max()
+        norm_values = (values - min_v) / (max_v - min_v + 1e-6)
+
+        # Grayscale colormap
+        cmap = plt.get_cmap("gray")
+        facecolors = cmap(norm_values)
+
+        collection = PolyCollection(
+            polygons,
+            edgecolors="black",
+            facecolors=facecolors,
+            linewidths=0.1
+        )
+
+        ax.add_collection(collection)
+
+        limit = size * (self.radius + 1) * 2
+        ax.set_xlim(-limit, limit)
+        ax.set_ylim(-limit, limit)
+        ax.set_aspect("equal")
+        ax.axis("off")
+
+        fig.savefig("fractalnoise.png", bbox_inches="tight", dpi=900)
+        return ax
 
     def draw_plates(self, size=1):
         fig, ax = plt.subplots()
@@ -374,68 +415,56 @@ class Grid:
 
  # extend your existing Grid class
     def draw_heightmap(self, size=1, colormap="terrain"):
-        """
-        Draw the hex grid colored by height values.
-        """
-        fig, ax = plt.subplots(figsize=(8, 8))
+        fig, ax = plt.subplots()
 
         # Convert hexes to numpy array
         hexes_array = np.array([[h.x, h.y, h.z] for h in self.grid])
-        x, y = self.cube_to_pixel(hexes_array, size)
+        cx, cy = self.cube_to_pixel(hexes_array, size)
 
-        # Precompute corner offsets
+        # Hex corner offsets
         angles = np.radians(np.arange(0, 360, 60) - 30)
-        corner_offsets = np.stack([np.cos(angles), np.sin(angles)], axis=1) * size
+        corner_offsets = np.stack(
+            [np.cos(angles), np.sin(angles)],
+            axis=1
+        ) * size
 
         # Build polygons
-        centers = np.stack([x, y], axis=1)
+        centers = np.stack([cx, cy], axis=1)
         polygons = (np.expand_dims(centers, 1) + corner_offsets).tolist()
 
-        # --- Map height to color ---
-        from matplotlib.colors import TwoSlopeNorm
-
+        # --- HEIGHT → COLOUR ---
         heights = np.array([h.height for h in self.grid])
 
-        # Define sea level
-        sea_level = 0
+        # Normalize to 0–1 for colormap
+        min_h = heights.min()
+        max_h = heights.max()
+        norm_heights = (heights - min_h) / (max_h - min_h + 1e-6)
+        norm_heights **= 1.2
 
-        norm = TwoSlopeNorm(
-            vmin=heights.min(),
-            vcenter=sea_level,
-            vmax=heights.max()
-        )
+        cmap = plt.get_cmap(colormap)
+        facecolors = cmap(norm_heights)
 
-        import matplotlib.colors as mcolors
-
-        cmap = mcolors.LinearSegmentedColormap.from_list(
-            "terrain_with_blue_sea",
-            [
-                (0.0, "#0b1d51"),   # deep ocean
-                (0.45, "#1f6fff"),  # shallow ocean
-                (0.5, "#4ec5ff"),   # 🌊 sea level (exactly center)
-                (0.55, "#3fa34d"),  # low land
-                (0.7, "#8c6d31"),   # hills
-                (1.0, "#ffffff")    # mountains
-            ]
-        )
-        facecolors = [cmap(norm(h)) for h in heights]
-
-        # Draw hex grid
+        # Create collection
         collection = PolyCollection(
             polygons,
             edgecolors="black",
             facecolors=facecolors,
             linewidths=0.1
         )
+
         ax.add_collection(collection)
 
-        # Set limits
+        # Set bounds
         limit = size * (self.radius + 1) * 2
         ax.set_xlim(-limit, limit)
         ax.set_ylim(-limit, limit)
         ax.set_aspect("equal")
         ax.axis("off")
 
-        # optional: save to file
+        # Optional: colorbar (very useful for debugging)
+        sm = plt.cm.ScalarMappable(cmap=cmap)
+        sm.set_array(norm_heights)
+        plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
+
         fig.savefig("heightmap.png", bbox_inches="tight", dpi=900)
         return ax

@@ -10,10 +10,13 @@ matplotlib.use("Agg")
 
 grid = Grid(radius=60, start_value=1)
 
+grid.generate_base_heightmap()
+grid.draw_fractal_noise()
+
 grid.generate_plates(num_plates=15)
 grid.draw_plates(size=1)
 
-grid.simulate_plates(steps=100, uplift_rate=0.03, rift_rate=0.03, smoothing=0.3, ocean_base=-0.3, continental_base=0.3)
+grid.simulate_plates(steps=300)
 grid.draw_heightmap(size=1)
 print('TADA!!!!!!')
 
