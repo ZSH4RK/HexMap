@@ -10,6 +10,7 @@ class Hex:
         self.y = y
         self.z = z
         self.value = value
+        self.height = 0
         self.base = base if base is not None else value
         # Strart from the most left then clockwise
         self.neighbour_directions = [   (-1, 0, 1), (0, -1, 1),
